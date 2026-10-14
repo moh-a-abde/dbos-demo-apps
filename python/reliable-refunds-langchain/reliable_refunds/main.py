@@ -55,16 +55,16 @@ ds = SQLAlchemyDatasource.create(database_url)
 APPROVAL_TIMEOUT_SEC = 60 * 60 * 24 * 7  # One week timeout for manual review
 
 sg_api_key = os.environ.get("SENDGRID_API_KEY")
-assert sg_api_key, "Error: SENDGRID_API_KEY is not set"
-
 from_email = os.environ.get("SENDGRID_FROM_EMAIL")
-assert from_email, "Error: SENDGRID_FROM_EMAIL is not set"
-
-admin_email = os.environ.get("ADMIN_EMAIL", None)
-assert admin_email, "Error: ADMIN_EMAIL is not set"
+admin_email = os.environ.get("ADMIN_EMAIL")
+openai_model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
 
 port = int(os.environ.get("PORT", "8000"))
 callback_domain = os.environ.get("DBOS_APP_HOSTNAME", f"http://localhost:{port}")
+
+
+def sendgrid_configured() -> bool:
+    return bool(sg_api_key and from_email and admin_email)
 
 
 # This tool lets the agent look up the details of an order given its ID.
@@ -141,7 +141,22 @@ def approval_workflow(purchase: Purchase):
 # to the approval workflow to approve or deny a refund.
 @DBOS.step()
 def send_email(purchase: Purchase):
-    content = f"{callback_domain}/approval/{DBOS.workflow_id}"
+    workflow_id = DBOS.workflow_id
+    content = f"{callback_domain}/approval/{workflow_id}"
+    approve_url = f"{content}/approve"
+    reject_url = f"{content}/reject"
+
+    if not sendgrid_configured():
+        notice = (
+            f"SendGrid is not configured. Manual review for order {purchase.order_id} "
+            f"({purchase.item}, ${purchase.price}).\n"
+            f"  Approve: {approve_url}\n"
+            f"  Reject:  {reject_url}"
+        )
+        DBOS.logger.info(notice)
+        print(f"\n{notice}\n", flush=True)
+        return
+
     msg = Template(Path(os.path.join(html_dir, "email.html")).read_text()).substitute(
         purchaseid=purchase.order_id,
         purchaseitem=purchase.item,
@@ -181,7 +196,7 @@ class State(TypedDict):
 # Set up LangGraph to answer refund requests. The agent uses two tools: one to look up order status, the other to process refunds.
 # Store checkpoints in the configured database so history persists across restarts.
 def create_agent(checkpointer):
-    llm = ChatOpenAI(model="gpt-5.4-mini")
+    llm = ChatOpenAI(model=openai_model)
     tools = [tool_get_purchase_by_id, process_refund, tool_get_all_purchases]
     llm_with_tools = llm.bind_tools(tools, parallel_tool_calls=False)
 
